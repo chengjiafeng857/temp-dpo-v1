@@ -12,6 +12,7 @@ from batch_log_prob import compute_batch_log_prob
 import wandb
 import os
 import json
+import shutil
 
 # load yaml config
 def load_yaml_config(path):
@@ -197,6 +198,15 @@ def train():
     
     os.makedirs(save_path, exist_ok=True)
     policy.save_pretrained(save_path)
+
+    # copy logs to mount dir
+    if mount_dir:
+        mount_log_dir = os.path.join(mount_dir, "logs")
+        print(f"Copying logs to mount dir: {mount_log_dir}")
+        try:
+            shutil.copytree(LOG_DIR, mount_log_dir, dirs_exist_ok=True)
+        except Exception as e:
+            print(f"Error copying logs to mount dir: {e}")
 
 if __name__ == "__main__":
     train()
