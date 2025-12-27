@@ -108,7 +108,20 @@ def train():
     ref_model.eval()
 
     # define optimizer
-    optimizer = AdamW(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
+    # define optimizer
+    optimizer = None
+    try:
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.AdamW8bit(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
+        print("Using bitsandbytes 8-bit AdamW optimizer")
+    except ImportError:
+        print("bitsandbytes not found.")
+    except Exception as e:
+        print(f"Failed to initialize 8-bit AdamW: {e}.")
+    
+    if optimizer is None:
+        print("Falling back to torch.optim.AdamW.")
+        optimizer = AdamW(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
 
     # using bf 16
     use_bf16 = config['precision'] == 'bf16'
