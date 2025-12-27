@@ -1,7 +1,8 @@
 # dataset_process.py
 import torch
+import torch.distributed as dist
 from datasets import load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 
 
@@ -125,10 +126,18 @@ def build_train_val(config, tokenizer):
 
     ds_collate = partial(process_ds, tokenizer=tokenizer, max_len=max_len)
 
+    is_distributed = dist.is_available() and dist.is_initialized()
+    train_sampler = None
+    val_sampler = None
+    if is_distributed:
+        train_sampler = DistributedSampler(train_ds_raw, shuffle=True, seed=seed)
+        val_sampler = DistributedSampler(val_ds_raw, shuffle=False, seed=seed)
+
     train_loader = DataLoader(
         train_ds_raw,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=not is_distributed,
+        sampler=train_sampler,
         collate_fn=ds_collate,
         pin_memory=True,
     )
@@ -136,6 +145,7 @@ def build_train_val(config, tokenizer):
         val_ds_raw,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=ds_collate,
         pin_memory=True,
     )

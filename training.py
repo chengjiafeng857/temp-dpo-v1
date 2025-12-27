@@ -1,5 +1,9 @@
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, StateDictType, FullStateDictConfig, BackwardPrefetch
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 import argparse
 import numpy as np
 import yaml
@@ -13,6 +17,8 @@ import wandb
 import os
 import json
 import shutil
+import functools
+import inspect
 
 # load yaml config
 def load_yaml_config(path):
@@ -70,6 +76,71 @@ def random_controler(seed=42):
 
 # eval()
 
+def init_distributed():
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, 0, 1
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("FSDP multi-GPU training requires CUDA.")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://")
+    rank = dist.get_rank()
+    return True, rank, local_rank, world_size
+
+
+def get_fsdp_auto_wrap_policy(model):
+    layer_cls = set()
+    if hasattr(model, "_no_split_modules") and model._no_split_modules:
+        no_split = set(model._no_split_modules)
+        for module in model.modules():
+            if module.__class__.__name__ in no_split:
+                layer_cls.add(module.__class__)
+
+    if not layer_cls:
+        return None
+
+    return functools.partial(transformer_auto_wrap_policy, transformer_layer_cls=layer_cls)
+
+
+def wrap_fsdp_model(model, use_bf16, device):
+    auto_wrap_policy = get_fsdp_auto_wrap_policy(model)
+    mixed_precision = None
+    if use_bf16:
+        mixed_precision = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        )
+
+    fsdp_kwargs = {
+        "auto_wrap_policy": auto_wrap_policy,
+        "mixed_precision": mixed_precision,
+        "sharding_strategy": ShardingStrategy.FULL_SHARD,
+        "backward_prefetch": BackwardPrefetch.BACKWARD_PRE,
+        "device_id": device,
+    }
+
+    if "use_orig_params" in inspect.signature(FSDP).parameters:
+        fsdp_kwargs["use_orig_params"] = True
+
+    return FSDP(model, **fsdp_kwargs)
+
+
+def save_model(policy, save_path, is_main_process):
+    if isinstance(policy, FSDP):
+        state_dict_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(policy, StateDictType.FULL_STATE_DICT, state_dict_cfg):
+            state_dict = policy.state_dict()
+        if is_main_process:
+            policy.module.save_pretrained(save_path, state_dict=state_dict)
+    else:
+        if is_main_process:
+            policy.save_pretrained(save_path)
+
 
 def train():
     parser = argparse.ArgumentParser()
@@ -78,14 +149,21 @@ def train():
 
     config = load_yaml_config(args.config)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    is_distributed, rank, local_rank, world_size = init_distributed()
+    is_main_process = rank == 0
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda", local_rank if is_distributed else 0)
+    else:
+        device = torch.device("cpu")
 
     random_controler()
 
     # initial wandb
-    wandb.init(project=config.get('wandb_project','handwritten-dpo'),
-               name=config.get('run_name','run'),
-               config=config)
+    if is_main_process:
+        wandb.init(project=config.get('wandb_project','handwritten-dpo'),
+                   name=config.get('run_name','run'),
+                   config=config)
 
     # load model and tokenizer
     policy_name = config['policy_name']
@@ -104,30 +182,34 @@ def train():
     # load dataset
     train_loader, val_loader = build_train_val(config=config, tokenizer=tok)
 
-    policy.train()
-    ref_model.eval()
-
-    # define optimizer
-    # define optimizer
-    optimizer = None
-    try:
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
-        print("Using bitsandbytes 8-bit AdamW optimizer")
-    except ImportError:
-        print("bitsandbytes not found.")
-    except Exception as e:
-        print(f"Failed to initialize 8-bit AdamW: {e}.")
-    
-    if optimizer is None:
-        print("Falling back to torch.optim.AdamW.")
-        optimizer = AdamW(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
-
     # using bf 16
     use_bf16 = config['precision'] == 'bf16'
     if use_bf16:
         policy.to(dtype=torch.bfloat16)
         ref_model.to(dtype=torch.bfloat16)
+
+    if is_distributed:
+        policy = wrap_fsdp_model(policy, use_bf16=use_bf16, device=device)
+        ref_model = wrap_fsdp_model(ref_model, use_bf16=use_bf16, device=device)
+
+    policy.train()
+    ref_model.eval()
+
+    # define optimizer
+    optimizer = None
+    if torch.cuda.is_available():
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
+            print("Using bitsandbytes 8-bit AdamW optimizer")
+        except ImportError:
+            print("bitsandbytes not found.")
+        except Exception as e:
+            print(f"Failed to initialize 8-bit AdamW: {e}.")
+
+    if optimizer is None:
+        print("Falling back to torch.optim.AdamW.")
+        optimizer = AdamW(params=policy.parameters(), lr=float(config['dpo_training']['learning_rate']))
 
     # define margin log
     LOG_DIR = "logs/margins"
@@ -145,10 +227,13 @@ def train():
         epoch_dir = os.path.join(LOG_DIR, f"epoch_{epoch:03d}")
         os.makedirs(epoch_dir, exist_ok=True)
 
+        if is_distributed and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
         pbar = tqdm(enumerate(train_loader),
                 total=len(train_loader),
                 desc=f"train | epoch {epoch+1}/{epochs}",
-                dynamic_ncols=True, leave=False)
+                dynamic_ncols=True, leave=False, disable=not is_main_process)
         
         running_loss = 0.0
         for step, batch in pbar:
@@ -169,13 +254,14 @@ def train():
                      beta=config['dpo_training']['beta']
                      )
                 
-                compute_and_log_model_margin(
-                    model_margin=model_margin,
-                    epoch_dir=epoch_dir,
-                    epoch=epoch,
-                    step=step,
-                    JSONL_PATH=JSONL_PATH
-                )
+                if is_main_process:
+                    compute_and_log_model_margin(
+                        model_margin=model_margin,
+                        epoch_dir=epoch_dir,
+                        epoch=epoch,
+                        step=step,
+                        JSONL_PATH=JSONL_PATH
+                    )
                 
                 loss = loss_raw.mean()
                 avg_chosen_rewards = chosen_rewards.mean()
@@ -192,12 +278,13 @@ def train():
             if (step + 1) % log_steps == 0:
                 avg_loss = running_loss / log_steps
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
-                wandb.log({
-                    'loss': avg_loss,
-                    'chosen_rewards': avg_chosen_rewards.item(),
-                    'rejected_rewards': avg_rejected_rewards.item(),
-                    'model_margin': avg_model_margin.item()
-                })
+                if is_main_process:
+                    wandb.log({
+                        'loss': avg_loss,
+                        'chosen_rewards': avg_chosen_rewards.item(),
+                        'rejected_rewards': avg_rejected_rewards.item(),
+                        'model_margin': avg_model_margin.item()
+                    })
                 running_loss = 0.0
 
     # save model
@@ -209,17 +296,28 @@ def train():
         save_path = "dpo_model"
         print(f"Saving model to default path: {save_path}")
     
-    os.makedirs(save_path, exist_ok=True)
-    policy.save_pretrained(save_path)
+    if is_distributed:
+        dist.barrier()
+
+    if is_main_process:
+        os.makedirs(save_path, exist_ok=True)
+    if is_distributed:
+        dist.barrier()
+
+    save_model(policy, save_path, is_main_process=is_main_process)
 
     # copy logs to mount dir
-    if mount_dir:
+    if mount_dir and is_main_process:
         mount_log_dir = os.path.join(mount_dir, "logs")
         print(f"Copying logs to mount dir: {mount_log_dir}")
         try:
             shutil.copytree(LOG_DIR, mount_log_dir, dirs_exist_ok=True)
         except Exception as e:
             print(f"Error copying logs to mount dir: {e}")
+
+    if is_distributed:
+        dist.barrier()
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()
