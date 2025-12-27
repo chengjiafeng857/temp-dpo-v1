@@ -1,0 +1,20 @@
+policy_name: meta-llama/Llama-3.2-1B
+ref_name: meta-llama/Llama-3.2-1B
+precision: bf16
+
+dataset:
+  dataset_name: Intel/orca_dpo_pairs
+  subset: train[:90%]
+  val_ratio: 0.1
+  seed: 42
+  max_len: 512
+  
+dpo_training:
+  epochs: 1
+  batch_size: 8
+  beta: 0.1
+  learning_rate: 1e-6
+  log_steps: 10
+
+
+
