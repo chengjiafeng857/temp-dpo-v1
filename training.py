@@ -187,7 +187,16 @@ def train():
                 running_loss = 0.0
 
     # save model
-    policy.save_pretrained("dpo_model")
+    mount_dir = config.get('mount_dir', None)
+    if mount_dir:
+        save_path = os.path.join(mount_dir, "dpo_model")
+        print(f"Saving model to mount dir: {save_path}")
+    else:
+        save_path = "dpo_model"
+        print(f"Saving model to default path: {save_path}")
+    
+    os.makedirs(save_path, exist_ok=True)
+    policy.save_pretrained(save_path)
 
 if __name__ == "__main__":
     train()
