@@ -6,7 +6,7 @@ import yaml
 from tqdm import tqdm
 import random
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from dataset_process import build_train_val
+from preference_datasets import get_batch_iterator
 from dpo_loss_v1 import dpo_loss
 from batch_log_prob import compute_batch_log_prob
 import wandb
@@ -100,8 +100,9 @@ def train():
     ref_model.config.pad_token_id = tok.pad_token_id
     ref_model.requires_grad_(False)
     
-    # load dataset
-    train_loader, val_loader = build_train_val(config=config, tokenizer=tok)
+    # dataset config extraction
+    ds_cfg = config['dataset']
+    train_cfg = config['dpo_training']
 
     policy.train()
     ref_model.eval()
@@ -122,17 +123,31 @@ def train():
 
 
     # training loop
-
-    # every epoch create a folder to save the model_margi
-    epochs = config['dpo_training']['epochs']
-    log_steps = config['dpo_training']['log_steps']
-
+    # Call get_batch_iterator per epoch to maintain per-epoch margin logging
+    log_steps = train_cfg['log_steps']
+    epochs = train_cfg['epochs']
+    
     for epoch in range(epochs):
+        # Create epoch directory for margin logging
         epoch_dir = os.path.join(LOG_DIR, f"epoch_{epoch:03d}")
         os.makedirs(epoch_dir, exist_ok=True)
-
-        pbar = tqdm(enumerate(train_loader),
-                total=len(train_loader),
+        
+        # Create iterator for this epoch (n_epochs=1)
+        train_iterator = get_batch_iterator(
+            names=ds_cfg['names'],
+            tokenizer=tok,
+            split=ds_cfg.get('split', 'train'),
+            batch_size=train_cfg['batch_size'],
+            shuffle=True,
+            max_length=ds_cfg.get('max_length', 512),
+            max_prompt_length=ds_cfg.get('max_prompt_length', 256),
+            sft_mode=False,
+            n_epochs=1,  # One epoch at a time
+            seed=train_cfg.get('seed', 42) + epoch,  # Different seed per epoch for shuffling
+            cache_dir=ds_cfg.get('cache_dir', None),
+        )
+        
+        pbar = tqdm(enumerate(train_iterator),
                 desc=f"train | epoch {epoch+1}/{epochs}",
                 dynamic_ncols=True, leave=False)
         
@@ -152,7 +167,7 @@ def train():
                      policy_rejected_log_prob=policy_rejected_log_prob,
                      ref_chosen_log_prob=ref_chosen_log_prob,
                      ref_rejected_log_prob=ref_rejected_log_prob,
-                     beta=config['dpo_training']['beta']
+                     beta=train_cfg['beta']
                      )
                 
                 compute_and_log_model_margin(
@@ -179,6 +194,7 @@ def train():
                 avg_loss = running_loss / log_steps
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
                 wandb.log({
+                    'epoch': epoch,
                     'loss': avg_loss,
                     'chosen_rewards': avg_chosen_rewards.item(),
                     'rejected_rewards': avg_rejected_rewards.item(),
