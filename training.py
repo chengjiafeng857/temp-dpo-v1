@@ -123,7 +123,7 @@ def train():
 
     # training loop
 
-    # every epoch create a folder to save the model_margin
+    # every epoch create a folder to save the model_margi
     epochs = config['dpo_training']['epochs']
     log_steps = config['dpo_training']['log_steps']
 
