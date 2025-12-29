@@ -60,7 +60,7 @@ if [ -z "$HF_TOKEN" ]; then
     AUTO_SHUTDOWN=false
     exit 1
 fi
-huggingface-cli login --token "$HF_TOKEN"
+uv run huggingface-cli login --token "$HF_TOKEN"
 
 # 5. WandB Login
 echo "Logging in to WandB..."
@@ -70,10 +70,10 @@ if [ -z "$WANDB_API_KEY" ]; then
     AUTO_SHUTDOWN=false
     exit 1
 fi
-wandb login "$WANDB_API_KEY"
+uv run wandb login "$WANDB_API_KEY"
 
 # 6. Run Training Scripts
 echo "Running training.py..."
-python training.py --config config_dpo.yaml
+uv run python training.py --config config_dpo.yaml
 
 echo "Training initialization sequence completed."

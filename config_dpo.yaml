@@ -16,6 +16,7 @@ dpo_training:
   beta: 0.1
   learning_rate: 1e-6
   log_steps: 10
+  fsdp: true
 
 
 

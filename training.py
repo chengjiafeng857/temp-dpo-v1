@@ -19,6 +19,7 @@ import json
 import shutil
 import functools
 import inspect
+import time
 
 # load yaml config
 def load_yaml_config(path):
@@ -74,21 +75,99 @@ def random_controler(seed=42):
     random.seed(seed)
     torch.backends.cudnn.deterministic=True
 
+
+def _rank_gpu_info(rank, local_rank):
+    info = {
+        "rank": int(rank),
+        "local_rank": int(local_rank),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+    }
+    if torch.cuda.is_available():
+        device_idx = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device_idx)
+        info.update(
+            {
+                "cuda_device_index": int(device_idx),
+                "cuda_device_name": props.name,
+                "cuda_total_memory_gb": round(props.total_memory / (1024**3), 2),
+            }
+        )
+    return info
+
+
+def _gather_rank_objects(obj, is_distributed, world_size):
+    if not is_distributed:
+        return [obj]
+    gathered = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, obj)
+    return gathered
+
+
+def log_distributed_info(is_distributed, rank, local_rank, world_size, is_main_process):
+    info = _rank_gpu_info(rank, local_rank)
+    info_list = _gather_rank_objects(info, is_distributed, world_size)
+    if not (is_main_process and wandb.run is not None):
+        return
+
+    flat_info = {}
+    for item in info_list:
+        r = item.get("rank", "unknown")
+        flat_info[f"gpu_rank{r}_name"] = item.get("cuda_device_name")
+        flat_info[f"gpu_rank{r}_total_mem_gb"] = item.get("cuda_total_memory_gb")
+        flat_info[f"gpu_rank{r}_device_index"] = item.get("cuda_device_index")
+        flat_info[f"gpu_rank{r}_visible_devices"] = item.get("cuda_visible_devices")
+        flat_info[f"gpu_rank{r}_visible_count"] = item.get("cuda_device_count")
+
+    wandb.config.update(
+        {
+            "world_size": int(world_size),
+            "rank": int(rank),
+            "local_rank": int(local_rank),
+            "distributed": bool(is_distributed),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        },
+        allow_val_change=True,
+    )
+    wandb.config.update(flat_info, allow_val_change=True)
+
+
+def gather_gpu_memory_stats(is_distributed, world_size, rank):
+    if not torch.cuda.is_available():
+        return None
+    stats = {
+        "rank": int(rank),
+        "allocated_gb": torch.cuda.memory_allocated() / (1024**3),
+        "reserved_gb": torch.cuda.memory_reserved() / (1024**3),
+        "max_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
+        "max_reserved_gb": torch.cuda.max_memory_reserved() / (1024**3),
+    }
+    return _gather_rank_objects(stats, is_distributed, world_size)
+
 # eval()
 
-def init_distributed():
+def init_distributed(enable_fsdp: bool = False):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if world_size <= 1:
+    if world_size <= 1 and not enable_fsdp:
         return False, 0, 0, 1
 
     if not torch.cuda.is_available():
-        raise RuntimeError("FSDP multi-GPU training requires CUDA.")
+        raise RuntimeError("FSDP training requires CUDA.")
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://")
+        if world_size > 1:
+            dist.init_process_group(backend="nccl", init_method="env://")
+        else:
+            dist.init_process_group(
+                backend="nccl",
+                init_method="tcp://127.0.0.1:29500",
+                rank=0,
+                world_size=1,
+            )
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     return True, rank, local_rank, world_size
 
 
@@ -149,8 +228,11 @@ def train():
 
     config = load_yaml_config(args.config)
 
-    is_distributed, rank, local_rank, world_size = init_distributed()
+    enable_fsdp = bool(config.get("dpo_training", {}).get("fsdp", False))
+    is_distributed, rank, local_rank, world_size = init_distributed(enable_fsdp=enable_fsdp)
     is_main_process = rank == 0
+    if is_main_process and enable_fsdp and world_size == 1:
+        print("FSDP is enabled with world_size=1. Use torchrun for multi-GPU sharding.")
 
     if torch.cuda.is_available():
         device = torch.device("cuda", local_rank if is_distributed else 0)
@@ -164,6 +246,20 @@ def train():
         wandb.init(project=config.get('wandb_project','handwritten-dpo'),
                    name=config.get('run_name','run'),
                    config=config)
+        wandb.define_metric("train/step")
+        wandb.define_metric("loss", step_metric="train/step")
+        wandb.define_metric("chosen_rewards", step_metric="train/step")
+        wandb.define_metric("rejected_rewards", step_metric="train/step")
+        wandb.define_metric("model_margin", step_metric="train/step")
+        wandb.define_metric("system/time_s")
+        wandb.define_metric("gpu/*", step_metric="system/time_s")
+    log_distributed_info(
+        is_distributed=is_distributed,
+        rank=rank,
+        local_rank=local_rank,
+        world_size=world_size,
+        is_main_process=is_main_process,
+    )
 
     # load model and tokenizer
     policy_name = config['policy_name']
@@ -223,6 +319,8 @@ def train():
     epochs = config['dpo_training']['epochs']
     log_steps = config['dpo_training']['log_steps']
 
+    start_time = time.time()
+
     for epoch in range(epochs):
         epoch_dir = os.path.join(LOG_DIR, f"epoch_{epoch:03d}")
         os.makedirs(epoch_dir, exist_ok=True)
@@ -273,18 +371,42 @@ def train():
             optimizer.step()
 
             running_loss += loss.item()
+            global_step = epoch * len(train_loader) + step + 1
+
+            gpu_stats = gather_gpu_memory_stats(
+                is_distributed=is_distributed,
+                world_size=world_size,
+                rank=rank,
+            )
 
             # log the training info
-            if (step + 1) % log_steps == 0:
+            log_now = (step + 1) % log_steps == 0
+            if log_now:
                 avg_loss = running_loss / log_steps
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
-                if is_main_process:
-                    wandb.log({
-                        'loss': avg_loss,
-                        'chosen_rewards': avg_chosen_rewards.item(),
-                        'rejected_rewards': avg_rejected_rewards.item(),
-                        'model_margin': avg_model_margin.item()
-                    })
+
+            if is_main_process and wandb.run is not None:
+                log_payload = {"system/time_s": time.time() - start_time}
+                if gpu_stats:
+                    for item in gpu_stats:
+                        r = item.get("rank", "unknown")
+                        log_payload[f"gpu/allocated_gb_rank{r}"] = item.get("allocated_gb")
+                        log_payload[f"gpu/reserved_gb_rank{r}"] = item.get("reserved_gb")
+                        log_payload[f"gpu/max_allocated_gb_rank{r}"] = item.get("max_allocated_gb")
+                        log_payload[f"gpu/max_reserved_gb_rank{r}"] = item.get("max_reserved_gb")
+                if log_now:
+                    log_payload.update(
+                        {
+                            "train/step": global_step,
+                            'loss': avg_loss,
+                            'chosen_rewards': avg_chosen_rewards.item(),
+                            'rejected_rewards': avg_rejected_rewards.item(),
+                            'model_margin': avg_model_margin.item(),
+                        }
+                    )
+                wandb.log(log_payload, step=global_step)
+
+            if log_now:
                 running_loss = 0.0
 
     # save model
