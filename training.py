@@ -251,8 +251,8 @@ def train():
         wandb.define_metric("chosen_rewards", step_metric="train/step")
         wandb.define_metric("rejected_rewards", step_metric="train/step")
         wandb.define_metric("model_margin", step_metric="train/step")
-        wandb.define_metric("system/time_s")
-        wandb.define_metric("gpu/*", step_metric="system/time_s")
+        wandb.define_metric("system/time_s", step_metric="train/step")
+        wandb.define_metric("gpu/*", step_metric="train/step")
     log_distributed_info(
         is_distributed=is_distributed,
         rank=rank,
@@ -386,7 +386,10 @@ def train():
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
 
             if is_main_process and wandb.run is not None:
-                log_payload = {"system/time_s": time.time() - start_time}
+                log_payload = {
+                    "train/step": global_step,
+                    "system/time_s": time.time() - start_time,
+                }
                 if gpu_stats:
                     for item in gpu_stats:
                         r = item.get("rank", "unknown")
@@ -397,7 +400,6 @@ def train():
                 if log_now:
                     log_payload.update(
                         {
-                            "train/step": global_step,
                             'loss': avg_loss,
                             'chosen_rewards': avg_chosen_rewards.item(),
                             'rejected_rewards': avg_rejected_rewards.item(),
