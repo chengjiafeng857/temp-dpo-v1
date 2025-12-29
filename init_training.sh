@@ -73,7 +73,11 @@ fi
 uv run wandb login "$WANDB_API_KEY"
 
 # 6. Run Training Scripts
-echo "Running training.py..."
-uv run python training.py --config config_dpo.yaml
+# Detect number of GPUs
+GPUS=$(uv run python -c "import torch; print(torch.cuda.device_count())")
+echo "Detected $GPUS GPUs."
+
+echo "Running training.py with torchrun..."
+uv run torchrun --nproc_per_node="$GPUS" --master_port=25001 training.py --config config_dpo.yaml
 
 echo "Training initialization sequence completed."
