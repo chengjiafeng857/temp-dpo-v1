@@ -12,7 +12,7 @@ import random
 from dataset_process import build_train_val
 from dpo_loss_v1 import dpo_loss
 from batch_log_prob import compute_batch_log_prob
-from model_utils import load_model, load_tokenizer
+from model_utils import dump_dpo_debug_samples, load_model, load_tokenizer
 import wandb
 import os
 import json
@@ -188,6 +188,14 @@ def train():
     
     # load dataset
     train_loader, val_loader = build_train_val(config=config, tokenizer=tok)
+    dpo_debug = config.get("dpo_debug", {}) or {}
+    if is_main_process and dpo_debug.get("enabled", False):
+        dump_dpo_debug_samples(
+            train_loader,
+            seed=int(config.get("dataset", {}).get("seed", 42)),
+            max_samples=int(dpo_debug.get("max_samples", 3)),
+            output_dir=str(dpo_debug.get("output_dir", "/logs/debugging")),
+        )
 
     # using bf 16
     use_bf16 = config['precision'] == 'bf16'

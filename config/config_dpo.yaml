@@ -13,10 +13,15 @@ dataset:
   
 dpo_training:
   epochs: 1
-  batch_size: 16
+  batch_size: 4
   beta: 0.1
   learning_rate: 1e-6
   log_steps: 10
+
+dpo_debug:
+  enabled: true
+  max_samples: 3
+  output_dir: /logs/debugging
 
 sft_training:
   enabled: true
@@ -34,4 +39,3 @@ sft_training:
   debug_samples: 5
   save_dir: ./logs/sft
   mount_save_dir: /mnt/output/sft_model
-
