@@ -9,6 +9,7 @@ AUTO_SHUTDOWN="${AUTO_SHUTDOWN:-true}"
 AUTO_SHUTDOWN_ON_FAIL="${AUTO_SHUTDOWN_ON_FAIL:-false}"
 CONFIG_PATH="config/config_dpo.yaml"
 DPO_REF_SOURCE="auto"
+DPO_MODEL_PATH=""
 
 maybe_disable_autoshut_on_fail() {
     if [[ "$AUTO_SHUTDOWN_ON_FAIL" != "true" ]]; then
@@ -18,6 +19,10 @@ maybe_disable_autoshut_on_fail() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --dpo-only-withpath)
+            DPO_MODEL_PATH="$2"
+            shift 2
+            ;;
         --noautoshut)
             AUTO_SHUTDOWN=false
             shift
@@ -35,12 +40,24 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config]"
+            cat <<'EOF'
+Usage:
+  ./init_training.sh [options]
+
+Options:
+  --config PATH                 Path to config YAML (default: config/config_dpo.yaml)
+  --noautoshut                  Disable auto-shutdown
+  --autoshut-on-fail             Only shutdown on failure
+  --dpo-ref-source auto|sft|config
+                                Choose DPO ref source (default: auto)
+  --dpo-only-withpath PATH       Run DPO only using PATH for both policy/ref
+  -h, --help                     Show this help message
+EOF
             exit 0
             ;;
         *)
             echo "Error: Unknown argument: $1"
-            echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config]"
+            echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config] [--dpo-only-withpath PATH]"
             exit 1
             ;;
     esac
@@ -160,7 +177,16 @@ fi
 
 DPO_POLICY_OVERRIDE=""
 DPO_REF_OVERRIDE=""
-if [[ "$DPO_REF_SOURCE" == "sft" || ( "$DPO_REF_SOURCE" == "auto" && "$RUN_SFT" == "true" ) ]]; then
+if [[ -n "$DPO_MODEL_PATH" ]]; then
+    if [[ ! -d "$DPO_MODEL_PATH" ]]; then
+        echo "Error: --dpo-model-path not found or not a directory: $DPO_MODEL_PATH"
+        maybe_disable_autoshut_on_fail
+        exit 1
+    fi
+    DPO_POLICY_OVERRIDE="$DPO_MODEL_PATH"
+    DPO_REF_OVERRIDE="$DPO_MODEL_PATH"
+    echo "Using provided DPO model path for policy/ref: $DPO_MODEL_PATH"
+elif [[ "$DPO_REF_SOURCE" == "sft" || ( "$DPO_REF_SOURCE" == "auto" && "$RUN_SFT" == "true" ) ]]; then
     DPO_REF_OVERRIDE=$(python - "$CONFIG_PATH" <<'PY'
 import os
 import sys
