@@ -78,6 +78,12 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
     maybe_disable_autoshut_on_fail
     exit 1
 fi
+
+if [[ -n "$DPO_MODEL_PATH" && ! -d "$DPO_MODEL_PATH" ]]; then
+    echo "Error: --dpo-only-withpath not found or not a directory: $DPO_MODEL_PATH"
+    maybe_disable_autoshut_on_fail
+    exit 1
+fi
 cleanup() {
     local exit_code=$?
     local should_shutdown=false
@@ -167,7 +173,10 @@ print("true" if enabled else "false")
 PY
 )
 
-if [[ "$RUN_SFT" == "true" ]]; then
+if [[ -n "$DPO_MODEL_PATH" ]]; then
+    echo "Skipping SFT training (--dpo-only-withpath set)."
+    RUN_SFT="false"
+elif [[ "$RUN_SFT" == "true" ]]; then
     echo "Running sft_training.py..."
     echo "Command: uv run python sft_training.py --config \"$CONFIG_PATH\""
     uv run python sft_training.py --config "$CONFIG_PATH" || { echo "Error: sft_training.py failed."; maybe_disable_autoshut_on_fail; exit 1; }
