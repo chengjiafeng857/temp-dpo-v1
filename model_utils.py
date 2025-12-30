@@ -101,7 +101,7 @@ def dump_dpo_debug_samples(
     train_loader,
     seed: int,
     max_samples: int = 3,
-    output_dir: str = "/logs/debugging",
+    output_dir: str = "logs/debugging",
 ) -> None:
     dataset = train_loader.dataset
     total = len(dataset)
