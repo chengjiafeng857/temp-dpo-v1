@@ -133,7 +133,7 @@ PY
 
 if [[ "$RUN_SFT" == "true" ]]; then
     echo "Running sft_training.py..."
-    python sft_training.py --config "$CONFIG_PATH" || { echo "Error: sft_training.py failed."; AUTO_SHUTDOWN=false; exit 1; }
+    uv run python sft_training.py --config "$CONFIG_PATH" || { echo "Error: sft_training.py failed."; AUTO_SHUTDOWN=false; exit 1; }
 else
     echo "Skipping SFT training (sft_training.enabled=false)."
 fi
@@ -205,9 +205,9 @@ if [[ -n "$DPO_POLICY_OVERRIDE" || -n "$DPO_REF_OVERRIDE" ]]; then
     if [[ -n "$DPO_REF_OVERRIDE" ]]; then
         DPO_ARGS+=(--ref-name "$DPO_REF_OVERRIDE")
     fi
-    python training.py --config "$CONFIG_PATH" "${DPO_ARGS[@]}"
+    uv run python training.py --config "$CONFIG_PATH" "${DPO_ARGS[@]}"
 else
-    python training.py --config "$CONFIG_PATH"
+    uv run python training.py --config "$CONFIG_PATH"
 fi
 
 echo "Training initialization sequence completed."
