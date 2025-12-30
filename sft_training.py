@@ -123,6 +123,7 @@ def _tokenize_sft_dataset(ds, tokenizer, max_len):
 # This is a temp simplified version of process_sft_ds in dataset_process.py, adapted for Hugging Face Trainer.
 # The function returns a tokenized Dataset ready for training.
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id  #redundant for safe-check
+    bos_token_id = tokenizer.bos_token_id
 
     def _tokenize(example):
         prompt = example["prompt"]
@@ -130,6 +131,8 @@ def _tokenize_sft_dataset(ds, tokenizer, max_len):
         truncation_mode = example.get("truncation_mode", "keep_start")
 
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        if bos_token_id is not None and (not prompt_ids or prompt_ids[0] != bos_token_id):
+            prompt_ids = [bos_token_id] + prompt_ids
         target_ids = tokenizer(sft_target, add_special_tokens=False)["input_ids"]
         if tokenizer.eos_token_id is not None:
             target_ids = target_ids + [tokenizer.eos_token_id]
@@ -138,8 +141,13 @@ def _tokenize_sft_dataset(ds, tokenizer, max_len):
 
         if len(input_ids) > max_len:
             if truncation_mode == "keep_end":
-                input_ids = input_ids[-max_len:]
-                labels = labels[-max_len:]
+                if bos_token_id is not None and input_ids and input_ids[0] == bos_token_id and max_len > 0:
+                    tail_len = max_len - 1
+                    input_ids = [bos_token_id] + input_ids[-tail_len:] if tail_len > 0 else [bos_token_id]
+                    labels = [-100] + labels[-tail_len:] if tail_len > 0 else [-100]
+                else:
+                    input_ids = input_ids[-max_len:]
+                    labels = labels[-max_len:]
             else:
                 input_ids = input_ids[:max_len]
                 labels = labels[:max_len]
