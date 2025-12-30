@@ -5,14 +5,15 @@ mount_dir: "mounts/output"
 
 dataset:
   dataset_name: Anthropic/hh-rlhf
-  subset: train[:90%]
+  subset: train[:50%]
   val_ratio: 0.1
   seed: 42
-  max_len: 256
+  max_len: 512
+  max_prompt_length: 128
   
 dpo_training:
   epochs: 1
-  batch_size: 8
+  batch_size: 16
   beta: 0.1
   learning_rate: 1e-6
   log_steps: 10
@@ -20,10 +21,10 @@ dpo_training:
 sft_training:
   enabled: true
   epochs: 1
-  batch_size: 8
-  eval_batch_size: 8
+  batch_size: 64
+  eval_batch_size: 64
   learning_rate: 1e-5
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   gradient_checkpointing: true
   log_steps: 5
   eval_steps: 100
@@ -33,5 +34,4 @@ sft_training:
   debug_samples: 5
   save_dir: ./logs/sft
   mount_save_dir: mounts/output/sft_model
-
 

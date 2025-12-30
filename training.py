@@ -145,9 +145,15 @@ def save_model(policy, save_path, is_main_process):
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument("--policy-name", type=str, default=None, help="Override policy model name/path")
+    parser.add_argument("--ref-name", type=str, default=None, help="Override ref model name/path")
     args=parser.parse_args()
 
     config = load_yaml_config(args.config)
+    if args.policy_name:
+        config["policy_name"] = args.policy_name
+    if args.ref_name:
+        config["ref_name"] = args.ref_name
 
     is_distributed, rank, local_rank, world_size = init_distributed()
     is_main_process = rank == 0

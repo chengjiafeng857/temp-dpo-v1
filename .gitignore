@@ -24,8 +24,9 @@ Thumbs.db
 # Outputs and artifacts
 logs/
 dpo_model/
-mounts/output/dpo_model/
+sft_model/
 *.log
 *.npy
 *.jsonl
 archive/
+wandb/
