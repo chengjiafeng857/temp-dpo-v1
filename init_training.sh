@@ -6,13 +6,24 @@ set -e
 # Auto-shutdown logic
 POD_ID="${RUNPOD_POD_ID:-}"
 AUTO_SHUTDOWN="${AUTO_SHUTDOWN:-true}"
+AUTO_SHUTDOWN_ON_FAIL="${AUTO_SHUTDOWN_ON_FAIL:-false}"
 CONFIG_PATH="config/config_dpo.yaml"
 DPO_REF_SOURCE="auto"
+
+maybe_disable_autoshut_on_fail() {
+    if [[ "$AUTO_SHUTDOWN_ON_FAIL" != "true" ]]; then
+        AUTO_SHUTDOWN=false
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --noautoshut)
             AUTO_SHUTDOWN=false
+            shift
+            ;;
+        --autoshut-on-fail)
+            AUTO_SHUTDOWN_ON_FAIL=true
             shift
             ;;
         --config)
@@ -24,12 +35,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--config PATH] [--noautoshut] [--dpo-ref-source auto|sft|config]"
+            echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config]"
             exit 0
             ;;
         *)
             echo "Error: Unknown argument: $1"
-            echo "Usage: $0 [--config PATH] [--noautoshut] [--dpo-ref-source auto|sft|config]"
+            echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config]"
             exit 1
             ;;
     esac
@@ -37,7 +48,7 @@ done
 
 if [[ "$DPO_REF_SOURCE" != "auto" && "$DPO_REF_SOURCE" != "sft" && "$DPO_REF_SOURCE" != "config" ]]; then
     echo "Error: Invalid --dpo-ref-source value: $DPO_REF_SOURCE"
-    echo "Usage: $0 [--config PATH] [--noautoshut] [--dpo-ref-source auto|sft|config]"
+    echo "Usage: $0 [--config PATH] [--noautoshut] [--autoshut-on-fail] [--dpo-ref-source auto|sft|config]"
     exit 1
 fi
 
@@ -47,11 +58,19 @@ fi
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
     echo "Error: Config file not found at $CONFIG_PATH"
-    AUTO_SHUTDOWN=false
+    maybe_disable_autoshut_on_fail
     exit 1
 fi
 cleanup() {
-    if [[ -n "$POD_ID" && "$AUTO_SHUTDOWN" == "true" ]]; then
+    local exit_code=$?
+    local should_shutdown=false
+    if [[ $exit_code -ne 0 && "$AUTO_SHUTDOWN_ON_FAIL" == "true" ]]; then
+        should_shutdown=true
+    elif [[ "$AUTO_SHUTDOWN" == "true" ]]; then
+        should_shutdown=true
+    fi
+
+    if [[ -n "$POD_ID" && "$should_shutdown" == "true" ]]; then
         echo "[cleanup] Training finished (or script exited). Stopping pod $POD_ID..."
         runpodctl stop pod "$POD_ID" || true
     else
@@ -79,18 +98,18 @@ echo "Installing dependencies..."
 # If uv.lock exists, use sync (fastest and most reliable)
 if [ -f "uv.lock" ]; then
     echo "Found uv.lock. Syncing environment..."
-    uv sync || { echo "Error: uv sync failed."; AUTO_SHUTDOWN=false; exit 1; }
+    uv sync || { echo "Error: uv sync failed."; maybe_disable_autoshut_on_fail; exit 1; }
 # If pyproject.toml exists but no lock, install from it
 elif [ -f "pyproject.toml" ]; then
     echo "Found pyproject.toml. Installing..."
-    uv pip install . || { echo "Error: uv pip install . failed."; AUTO_SHUTDOWN=false; exit 1; }
+    uv pip install . || { echo "Error: uv pip install . failed."; maybe_disable_autoshut_on_fail; exit 1; }
 # Fallback to requirements.txt
 elif [ -f "requirements.txt" ]; then
     echo "Found requirements.txt. Installing..."
-    uv pip install -r requirements.txt || { echo "Error: uv pip install requirements.txt failed."; AUTO_SHUTDOWN=false; exit 1; }
+    uv pip install -r requirements.txt || { echo "Error: uv pip install requirements.txt failed."; maybe_disable_autoshut_on_fail; exit 1; }
 else
     echo "Error: No dependency file found (uv.lock, pyproject.toml, or requirements.txt)."
-    AUTO_SHUTDOWN=false
+    maybe_disable_autoshut_on_fail
     exit 1
 fi
 
@@ -101,7 +120,7 @@ echo "Logging in to Hugging Face..."
 if [ -z "$HF_TOKEN" ]; then
     echo "Error: HF_TOKEN environment variable is not set."
     echo "Please export HF_TOKEN='your_token_here' before running this script."
-    AUTO_SHUTDOWN=false
+    maybe_disable_autoshut_on_fail
     exit 1
 fi
 huggingface-cli login --token "$HF_TOKEN"
@@ -111,7 +130,7 @@ echo "Logging in to WandB..."
 if [ -z "$WANDB_API_KEY" ]; then
     echo "Error: WANDB_API_KEY environment variable is not set."
     echo "Please export WANDB_API_KEY='your_key_here' before running this script."
-    AUTO_SHUTDOWN=false
+    maybe_disable_autoshut_on_fail
     exit 1
 fi
 wandb login "$WANDB_API_KEY"
@@ -133,7 +152,7 @@ PY
 
 if [[ "$RUN_SFT" == "true" ]]; then
     echo "Running sft_training.py..."
-    uv run python sft_training.py --config "$CONFIG_PATH" || { echo "Error: sft_training.py failed."; AUTO_SHUTDOWN=false; exit 1; }
+    uv run python sft_training.py --config "$CONFIG_PATH" || { echo "Error: sft_training.py failed."; maybe_disable_autoshut_on_fail; exit 1; }
 else
     echo "Skipping SFT training (sft_training.enabled=false)."
 fi
@@ -189,7 +208,7 @@ PY
         echo "Using SFT model as DPO policy/ref: $DPO_REF_OVERRIDE"
     elif [[ "$DPO_REF_SOURCE" == "sft" ]]; then
         echo "Error: No SFT output found to use as DPO ref."
-        AUTO_SHUTDOWN=false
+        maybe_disable_autoshut_on_fail
         exit 1
     else
         echo "No SFT output found; using config ref_name."
