@@ -23,7 +23,58 @@ def resolve_torch_dtype(precision: str) -> torch.dtype | None:
     return None
 
 
+def _is_local_dir(path: str) -> bool:
+    return os.path.isdir(path)
+
+
+def load_tokenizer(
+    model_name_or_path: str,
+    local_path: str | None = None,
+    fix_mistral_regex: bool = True,
+):
+    _disable_hf_transfer_if_missing()
+    model_path = local_path or model_name_or_path
+    if local_path and not os.path.isdir(local_path):
+        raise FileNotFoundError(f"Local model path not found: {local_path}")
+    local_only = bool(local_path) or _is_local_dir(model_path)
+    tokenizer_kwargs = {"local_files_only": local_only}
+    if fix_mistral_regex:
+        tokenizer_kwargs["fix_mistral_regex"] = True
+        try:
+            return AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+        except TypeError:
+            tokenizer_kwargs.pop("fix_mistral_regex", None)
+    return AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+
+
 def load_model_and_tokenizer(
+    model_name_or_path: str,
+    torch_dtype: torch.dtype | None = None,
+    device: str | None = None,
+    local_path: str | None = None,
+    fix_mistral_regex: bool = True,
+):
+    _disable_hf_transfer_if_missing()
+    model_path = local_path or model_name_or_path
+    if local_path and not os.path.isdir(local_path):
+        raise FileNotFoundError(f"Local model path not found: {local_path}")
+    local_only = bool(local_path) or _is_local_dir(model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch_dtype,
+        local_files_only=local_only,
+    )
+    tokenizer = load_tokenizer(
+        model_name_or_path,
+        local_path=local_path,
+        fix_mistral_regex=fix_mistral_regex,
+    )
+    if device:
+        model = model.to(device)
+    return model, tokenizer
+
+
+def load_model(
     model_name_or_path: str,
     torch_dtype: torch.dtype | None = None,
     device: str | None = None,
@@ -33,16 +84,12 @@ def load_model_and_tokenizer(
     model_path = local_path or model_name_or_path
     if local_path and not os.path.isdir(local_path):
         raise FileNotFoundError(f"Local model path not found: {local_path}")
-    local_only = bool(local_path)
+    local_only = bool(local_path) or _is_local_dir(model_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch_dtype,
         local_files_only=local_only,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        local_files_only=local_only,
-    )
     if device:
         model = model.to(device)
-    return model, tokenizer
+    return model

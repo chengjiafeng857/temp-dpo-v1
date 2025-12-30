@@ -9,10 +9,10 @@ import numpy as np
 import yaml
 from tqdm import tqdm
 import random
-from transformers import AutoTokenizer, AutoModelForCausalLM
 from dataset_process import build_train_val
 from dpo_loss_v1 import dpo_loss
 from batch_log_prob import compute_batch_log_prob
+from model_utils import load_model, load_tokenizer
 import wandb
 import os
 import json
@@ -174,14 +174,15 @@ def train():
     # load model and tokenizer
     policy_name = config['policy_name']
     ref_name = config['ref_name']
-    policy = AutoModelForCausalLM.from_pretrained(policy_name).to(device)
-    tok = AutoTokenizer.from_pretrained(policy_name)
+    policy = load_model(policy_name, device=device)
+    fix_mistral_regex = config.get("fix_mistral_regex", True)
+    tok = load_tokenizer(policy_name, fix_mistral_regex=fix_mistral_regex)
     tok.padding_side = "right"
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     policy.config.pad_token_id = tok.pad_token_id
 
-    ref_model = AutoModelForCausalLM.from_pretrained(ref_name).to(device)
+    ref_model = load_model(ref_name, device=device)
     ref_model.config.pad_token_id = tok.pad_token_id
     ref_model.requires_grad_(False)
     

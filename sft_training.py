@@ -298,11 +298,13 @@ def main():
     policy_name = config["policy_name"]
     torch_dtype = resolve_torch_dtype(config.get("precision"))
     local_model_path = config.get("local_model_path") or config.get("sft_training", {}).get("local_model_path")
+    fix_mistral_regex = config.get("fix_mistral_regex", True)
     policy, tokenizer = load_model_and_tokenizer(
         policy_name,
         torch_dtype=torch_dtype,
         device=device,
         local_path=local_model_path,
+        fix_mistral_regex=fix_mistral_regex,
     )
 # Set up tokenizer padding, if pad_id not in tokenizer, default to end-of-sequence token 
     tokenizer.padding_side = "right"
