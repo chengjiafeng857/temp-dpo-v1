@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local configs and secrets
+.env
+.env.*
+
+# Outputs and artifacts
+logs/
+dpo_model/
+mounts/output/dpo_model/
+*.log
+*.npy
+*.jsonl
+archive/

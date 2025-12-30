@@ -1,9 +1,172 @@
 # dataset_process.py
 import torch
 import torch.distributed as dist
+from collections import defaultdict
 from datasets import load_dataset
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
+from typing import Dict, Iterable, List, Tuple
+import tqdm
+
+
+def extract_anthropic_prompt(prompt_and_response: str) -> str:
+    """Extract the Anthropic prompt from a prompt + response string."""
+    search_term = "\n\nAssistant:"
+    search_term_idx = prompt_and_response.rfind(search_term)
+    if search_term_idx == -1:
+        raise ValueError(f"Prompt does not contain '{search_term}'")
+    return prompt_and_response[:search_term_idx + len(search_term)]
+
+
+def _is_hh_dataset(name: str) -> bool:
+    """Return True when the dataset name refers to the HH dataset."""
+    name = name.lower()
+    return name in {"hh", "hh-rlhf", "anthropic/hh-rlhf"}
+
+
+def _is_shp_dataset(name: str) -> bool:
+    """Return True when the dataset name refers to the SHP dataset."""
+    name = name.lower()
+    return name in {"shp", "stanfordnlp/shp"}
+
+
+def _flatten_prompt_pairs(data: Dict[str, Dict[str, List]]) -> List[Dict[str, str]]:
+    """Convert prompt-keyed responses/pairs into flat prompt/chosen/rejected rows."""
+    pairs: List[Dict[str, str]] = []
+    for prompt, info in data.items():
+        responses = info["responses"]
+        for chosen_idx, rejected_idx in info["pairs"]:
+            pairs.append(
+                {
+                    "prompt": prompt,
+                    "chosen": responses[chosen_idx],
+                    "rejected": responses[rejected_idx],
+                }
+            )
+    return pairs
+
+
+def _build_hh_data(
+    dataset: Iterable[Dict[str, str]],
+    *,
+    silent: bool = True,
+) -> Dict[str, Dict[str, List]]:
+    """Convert HH rows into a prompt-keyed structure."""
+    data: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+    for row in tqdm.tqdm(dataset, desc="Processing HH", disable=silent):
+        prompt = extract_anthropic_prompt(row["chosen"])
+        chosen_response = row["chosen"][len(prompt):]
+        rejected_response = row["rejected"][len(prompt):]
+
+        n_responses = len(data[prompt]["responses"])
+        data[prompt]["pairs"].append((n_responses, n_responses + 1))
+        data[prompt]["responses"].extend([chosen_response, rejected_response])
+        data[prompt]["sft_target"] = chosen_response
+
+    if not silent:
+        print(f"Successfully processed {len(data)} prompts.")
+
+    return data
+
+
+def _build_hh_pairs(dataset: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Return HH preference pairs in flat prompt/chosen/rejected format."""
+    return _flatten_prompt_pairs(_build_hh_data(dataset))
+
+
+def _build_shp_data(dataset: Iterable[Dict[str, str]]) -> Dict[str, Dict[str, List]]:
+    """Convert SHP rows into prompt-keyed responses/pairs and sft_target."""
+    data: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+    for row in dataset:
+        prompt = "\n\nHuman: " + row["history"] + "\n\nAssistant:"
+        responses = [" " + row["human_ref_A"], " " + row["human_ref_B"]]
+        scores = [row["score_A"], row["score_B"]]
+
+        score_ratio = max(scores[0] / scores[1], scores[1] / scores[0])
+        if score_ratio < 2:
+            continue
+
+        n_responses = len(data[prompt]["responses"])
+        chosen_first = row["labels"] == 1
+        data[prompt]["pairs"].append(
+            (n_responses, n_responses + 1) if chosen_first else (n_responses + 1, n_responses)
+        )
+        data[prompt]["responses"].extend(responses)
+        data[prompt]["scores"].extend(scores)
+
+    for prompt, info in data.items():
+        scores = info["scores"]
+        responses = info["responses"]
+        best_idx = max(range(len(scores)), key=lambda idx: scores[idx])
+        info["sft_target"] = responses[best_idx]
+        del info["scores"]
+
+    return data
+
+
+def _build_shp_pairs(dataset: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Convert SHP rows into prompt/chosen/rejected pairs with score filtering."""
+    return _flatten_prompt_pairs(_build_shp_data(dataset))
+
+
+def _extract_texts(item: Dict[str, str]) -> Tuple[str, str, str]:
+    """Normalize supported datasets into (prompt, chosen, rejected) text."""
+    if "prompt" in item:
+        return item["prompt"], item["chosen"], item["rejected"]
+
+    prompt_txt = "Prompt: " + item["question"].strip() + "\n"
+    chosen_txt = "Response: " + item["chosen"].strip() + "\n"
+    rejected_txt = "Response: " + item["rejected"].strip() + "\n"
+    return prompt_txt, chosen_txt, rejected_txt
+
+
+def _build_sft_records(dataset: Iterable[Dict[str, str]], dataset_name: str) -> List[Dict[str, str]]:
+    """Build prompt/sft_target records for SFT training."""
+    records: List[Dict[str, str]] = []
+
+    if _is_hh_dataset(dataset_name):
+        data = _build_hh_data(dataset)
+        for prompt, info in data.items():
+            records.append(
+                {
+                    "prompt": prompt,
+                    "sft_target": info["sft_target"],
+                    "truncation_mode": "keep_end",
+                }
+            )
+        return records
+
+    if _is_shp_dataset(dataset_name):
+        data = _build_shp_data(dataset)
+        for prompt, info in data.items():
+            records.append(
+                {
+                    "prompt": prompt,
+                    "sft_target": info["sft_target"],
+                    "truncation_mode": "keep_start",
+                }
+            )
+        return records
+
+    for row in dataset:
+        if "prompt" in row and "sft_target" in row:
+            prompt_txt = row["prompt"]
+            sft_target = row["sft_target"]
+        elif "prompt" in row and "chosen" in row:
+            prompt_txt = row["prompt"]
+            sft_target = row["chosen"]
+        else:
+            prompt_txt, chosen_txt, _ = _extract_texts(row)
+            sft_target = chosen_txt
+        records.append(
+            {
+                "prompt": prompt_txt,
+                "sft_target": sft_target,
+                "truncation_mode": "keep_start",
+            }
+        )
+
+    return records
 
 
 def _safe_get(example: dict, key: str):
