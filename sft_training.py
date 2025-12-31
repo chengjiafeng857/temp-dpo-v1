@@ -59,7 +59,7 @@ def load_yaml_config(path: str) -> dict[str, Any]:
         return cast(dict[str, Any], yaml.safe_load(handle))
 
 
-def random_controler(seed=42):
+def random_controler(seed=42) -> None:
 # Set random seeds for reproducibility
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
