@@ -21,7 +21,7 @@ dpo_training:
   gradient_clipping_enabled: true
   max_grad_norm: 10
   warmup_steps: 0
-  eval_steps: 100
+  eval_steps: 1
   log_steps: 10
 
 dpo_debug:
