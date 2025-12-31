@@ -178,20 +178,40 @@ def evaluate_dpo(
         )
         for batch in eval_iter:
             if is_main_process and not debug_printed and tokenizer is not None:
-                chosen_ids = batch["chosen_input_ids"][0]
-                chosen_mask = batch["chosen_attention_mask"][0].bool()
-                rejected_ids = batch["rejected_input_ids"][0]
-                rejected_mask = batch["rejected_attention_mask"][0].bool()
-                chosen_ids_trim = chosen_ids[chosen_mask].tolist()
-                rejected_ids_trim = rejected_ids[rejected_mask].tolist()
-                print("[eval debug] chosen text:")
-                print(tokenizer.decode(chosen_ids_trim, skip_special_tokens=True))
-                print("[eval debug] chosen token ids:")
-                print(chosen_ids_trim)
-                print("[eval debug] rejected text:")
-                print(tokenizer.decode(rejected_ids_trim, skip_special_tokens=True))
-                print("[eval debug] rejected token ids:")
-                print(rejected_ids_trim)
+                sample_index = 0
+                raw_record = None
+                sampler = getattr(val_loader, "sampler", None)
+                if sampler is not None and getattr(sampler, "shuffle", False) is False:
+                    sample_index = int(getattr(sampler, "rank", 0))
+                if hasattr(val_loader, "dataset"):
+                    try:
+                        raw_record = val_loader.dataset[sample_index]
+                    except Exception as exc:
+                        print(f"DPO debug: failed to read raw record: {exc}")
+
+                record = {
+                    "index": int(sample_index),
+                    "raw_record": raw_record,
+                }
+                for key in (
+                    "chosen_input_ids",
+                    "chosen_attention_mask",
+                    "chosen_labels",
+                    "rejected_input_ids",
+                    "rejected_attention_mask",
+                    "rejected_labels",
+                    "prompt_length",
+                ):
+                    if key in batch:
+                        value = batch[key][0]
+                        record[key] = value.tolist() if torch.is_tensor(value) else value
+
+                print("DPO debug: raw samples (pre-tokenization)")
+                print(f"sample_1_index: {sample_index}")
+                print(f"raw_record: {raw_record}")
+                print("DPO debug sample 1:")
+                for key, value in record.items():
+                    print(f"{key}: {value}")
                 debug_printed = True
             batch = to_device_batch(batch, device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
@@ -515,8 +535,7 @@ def train():
                         f"eval/{key[5:]}" if key.startswith("eval_") else f"eval/{key}": value
                         for key, value in eval_metrics.items()
                     }
-                    eval_metrics_with_alias = {**eval_metrics, **eval_metrics_prefixed}
-                    wandb.log(eval_metrics_with_alias, step=global_step)
+                    wandb.log(eval_metrics_prefixed, step=global_step)
                 policy.train()
 
     # save model
