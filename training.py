@@ -344,6 +344,11 @@ def train():
             running_loss += loss_raw_mean.item()
 
             # log the training info
+            if is_main_process and epoch == 0 and step == 0:
+                wandb.log({
+                    'preference_accuracy': preference_accuracy.item(),
+                    'preference_accuracy_per_token': preference_accuracy_per_token.item(),
+                }, step=0)
             if (step + 1) % log_steps == 0:
                 avg_loss = running_loss / log_steps
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
