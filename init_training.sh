@@ -10,6 +10,7 @@ AUTO_SHUTDOWN_ON_FAIL="${AUTO_SHUTDOWN_ON_FAIL:-false}"
 CONFIG_PATH="config/config_dpo.yaml"
 DPO_REF_SOURCE="auto"
 DPO_MODEL_PATH=""
+INTERRUPTED=false
 
 maybe_disable_autoshut_on_fail() {
     if [[ "$AUTO_SHUTDOWN_ON_FAIL" != "true" ]]; then
@@ -101,6 +102,14 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+handle_interrupt() {
+    INTERRUPTED=true
+    AUTO_SHUTDOWN=false
+    AUTO_SHUTDOWN_ON_FAIL=false
+    echo "[signal] SIGINT received; skipping auto-shutdown."
+    exit 130
+}
+trap handle_interrupt INT
 
 echo "Starting training initialization..."
 
