@@ -167,13 +167,20 @@ def train():
 
     # initial wandb
     if is_main_process:
-        wandb.init(project=config.get('wandb_project','handwritten-dpo'),
+        wandb.init(project=config.get('wandb_project','dpo-v1'),
                    name=config.get('run_name','run'),
                    config=config)
 
     # load model and tokenizer
     policy_name = config['policy_name']
-    ref_name = config['ref_name']
+    ref_name = config.get('ref_name', policy_name)
+    if ref_name != policy_name:
+        if is_main_process:
+            print(f"Overriding ref_name ({ref_name}) to match policy_name ({policy_name}).")
+        ref_name = policy_name
+    if is_main_process:
+        print(f"Using policy model: {policy_name}")
+        print(f"Using ref model: {ref_name}")
     policy = load_model(policy_name, device=device)
     fix_mistral_regex = config.get("fix_mistral_regex", True)
     tok = load_tokenizer(policy_name, fix_mistral_regex=fix_mistral_regex)
@@ -237,6 +244,32 @@ def train():
     # every epoch create a folder to save the model_margin
     epochs = config['dpo_training']['epochs']
     log_steps = config['dpo_training']['log_steps']
+    dpo_training_config = config.get("dpo_training", {}) or {}
+    gradient_accumulation_steps = int(dpo_training_config.get("gradient_accumulation_steps", 1))
+    if gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
+    warmup_steps = int(dpo_training_config.get("warmup_steps", 0))
+    grad_clip_enabled = bool(dpo_training_config.get("gradient_clipping_enabled", False))
+    max_grad_norm = float(dpo_training_config.get("max_grad_norm", 1.0))
+    if grad_clip_enabled and max_grad_norm <= 0:
+        raise ValueError("max_grad_norm must be > 0 when gradient clipping is enabled")
+    steps_per_epoch = (len(train_loader) + gradient_accumulation_steps - 1) // gradient_accumulation_steps
+    total_steps = epochs * steps_per_epoch
+    scheduler = None
+    if warmup_steps > 0:
+        if warmup_steps > total_steps:
+            if is_main_process:
+                print(f"Warmup steps ({warmup_steps}) exceed total steps ({total_steps}); clamping.")
+            warmup_steps = total_steps
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step + 1) / float(max(1, warmup_steps))
+            return 1.0
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        if is_main_process:
+            print(f"Using linear warmup for {warmup_steps} steps.")
 
     for epoch in range(epochs):
         epoch_dir = os.path.join(LOG_DIR, f"epoch_{epoch:03d}")
@@ -251,6 +284,7 @@ def train():
                 dynamic_ncols=True, leave=False, disable=not is_main_process)
         
         running_loss = 0.0
+        optimizer.zero_grad()
         for step, batch in pbar:
             batch = to_device_batch(batch, device)
 
@@ -278,28 +312,42 @@ def train():
                         JSONL_PATH=JSONL_PATH
                     )
                 
-                loss = loss_raw.mean()
+                loss_raw_mean = loss_raw.mean()
                 avg_chosen_rewards = chosen_rewards.mean()
                 avg_rejected_rewards = rejected_rewards.mean()
                 avg_model_margin = model_margin.mean()
 
-            optimizer.zero_grad()
+            loss = loss_raw_mean / gradient_accumulation_steps
             loss.backward()
-            optimizer.step()
 
-            running_loss += loss.item()
+            is_accum_step = (step + 1) % gradient_accumulation_steps == 0
+            is_last_step = (step + 1) == len(train_loader)
+            if is_accum_step or is_last_step:
+                if grad_clip_enabled:
+                    if hasattr(policy, "clip_grad_norm_"):
+                        policy.clip_grad_norm_(max_grad_norm)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+                optimizer.step()
+                optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step()
+
+            running_loss += loss_raw_mean.item()
 
             # log the training info
             if (step + 1) % log_steps == 0:
                 avg_loss = running_loss / log_steps
                 pbar.set_postfix(loss=f"{avg_loss:.3f}")
                 if is_main_process:
+                    current_lr = optimizer.param_groups[0].get("lr", None)
                     wandb.log({
                         'loss': avg_loss,
                         'chosen_rewards': avg_chosen_rewards.item(),
                         'rejected_rewards': avg_rejected_rewards.item(),
-                        'model_margin': avg_model_margin.item()
-                    })
+                        'model_margin': avg_model_margin.item(),
+                        'lr': current_lr
+                    }, step=(epoch * len(train_loader) + step + 1))
                 running_loss = 0.0
 
     # save model

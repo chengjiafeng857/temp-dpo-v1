@@ -298,7 +298,7 @@ def main():
     random_controler()
 # wandb init
     wandb.init(
-        project=config.get("wandb_project", "handwritten-dpo"),
+        project=config.get("wandb_project", "dpo-v1"),
         name=config.get("run_name", "sft-run"),
         config=config,
     )
