@@ -142,7 +142,17 @@ def save_model(policy, save_path, is_main_process):
             policy.save_pretrained(save_path)
 
 
-def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distributed, is_main_process):
+def evaluate_dpo(
+    policy,
+    ref_model,
+    val_loader,
+    device,
+    use_bf16,
+    beta,
+    is_distributed,
+    is_main_process,
+    tokenizer,
+):
     policy.eval()
     ref_model.eval()
 
@@ -153,7 +163,10 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
     policy_pref_correct_sum = 0.0
     pref_token_correct_sum = 0.0
     policy_pref_token_correct_sum = 0.0
+    mean_logp_tok_chosen_sum = 0.0
+    margin_tok_mean_sum = 0.0
     sample_count = 0
+    debug_printed = False
 
     with torch.no_grad():
         eval_iter = tqdm(
@@ -164,6 +177,22 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
             disable=not is_main_process,
         )
         for batch in eval_iter:
+            if is_main_process and not debug_printed and tokenizer is not None:
+                chosen_ids = batch["chosen_input_ids"][0]
+                chosen_mask = batch["chosen_attention_mask"][0].bool()
+                rejected_ids = batch["rejected_input_ids"][0]
+                rejected_mask = batch["rejected_attention_mask"][0].bool()
+                chosen_ids_trim = chosen_ids[chosen_mask].tolist()
+                rejected_ids_trim = rejected_ids[rejected_mask].tolist()
+                print("[eval debug] chosen text:")
+                print(tokenizer.decode(chosen_ids_trim, skip_special_tokens=True))
+                print("[eval debug] chosen token ids:")
+                print(chosen_ids_trim)
+                print("[eval debug] rejected text:")
+                print(tokenizer.decode(rejected_ids_trim, skip_special_tokens=True))
+                print("[eval debug] rejected token ids:")
+                print(rejected_ids_trim)
+                debug_printed = True
             batch = to_device_batch(batch, device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 policy_chosen_log_prob, policy_rejected_log_prob, ref_chosen_log_prob, ref_rejected_log_prob = compute_batch_log_prob(
@@ -191,6 +220,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
             policy_per_token_chosen = policy_chosen_log_prob / chosen_token_counts
             policy_per_token_rejected = policy_rejected_log_prob / rejected_token_counts
             policy_pref_token_correct_sum += (policy_per_token_chosen > policy_per_token_rejected).float().sum().item()
+            mean_logp_tok_chosen_sum += policy_per_token_chosen.sum().item()
+            margin_tok_mean_sum += (policy_per_token_chosen - policy_per_token_rejected).sum().item()
             sample_count += batch_size
 
     if is_distributed:
@@ -203,6 +234,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
                 policy_pref_correct_sum,
                 pref_token_correct_sum,
                 policy_pref_token_correct_sum,
+                mean_logp_tok_chosen_sum,
+                margin_tok_mean_sum,
                 sample_count,
             ],
             device=device,
@@ -216,6 +249,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
             policy_pref_correct_sum,
             pref_token_correct_sum,
             policy_pref_token_correct_sum,
+            mean_logp_tok_chosen_sum,
+            margin_tok_mean_sum,
             sample_count,
         ) = stats.tolist()
 
@@ -228,6 +263,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
         "eval_preference_accuracy_policy": policy_pref_correct_sum / sample_count,
         "eval_preference_accuracy_per_token": pref_token_correct_sum / sample_count,
         "eval_preference_accuracy_policy_per_token": policy_pref_token_correct_sum / sample_count,
+        "eval_mean_logp_tok_chosen": mean_logp_tok_chosen_sum / sample_count,
+        "eval_margin_tok_mean": margin_tok_mean_sum / sample_count,
     }
 
 
@@ -471,9 +508,15 @@ def train():
                     beta=config['dpo_training']['beta'],
                     is_distributed=is_distributed,
                     is_main_process=is_main_process,
+                    tokenizer=tok,
                 )
                 if is_main_process:
-                    wandb.log(eval_metrics, step=global_step)
+                    eval_metrics_prefixed = {
+                        f"eval/{key[5:]}" if key.startswith("eval_") else f"eval/{key}": value
+                        for key, value in eval_metrics.items()
+                    }
+                    eval_metrics_with_alias = {**eval_metrics, **eval_metrics_prefixed}
+                    wandb.log(eval_metrics_with_alias, step=global_step)
                 policy.train()
 
     # save model
