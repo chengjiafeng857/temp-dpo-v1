@@ -316,6 +316,14 @@ def train():
                 avg_chosen_rewards = chosen_rewards.mean()
                 avg_rejected_rewards = rejected_rewards.mean()
                 avg_model_margin = model_margin.mean()
+                preference_accuracy = (chosen_rewards > rejected_rewards).float().mean()
+                chosen_token_counts = (batch["chosen_labels"] != -100).sum(-1).clamp(min=1)
+                rejected_token_counts = (batch["rejected_labels"] != -100).sum(-1).clamp(min=1)
+                per_token_chosen_reward = chosen_rewards / chosen_token_counts
+                per_token_rejected_reward = rejected_rewards / rejected_token_counts
+                preference_accuracy_per_token = (
+                    per_token_chosen_reward > per_token_rejected_reward
+                ).float().mean()
 
             loss = loss_raw_mean / gradient_accumulation_steps
             loss.backward()
@@ -346,6 +354,8 @@ def train():
                         'chosen_rewards': avg_chosen_rewards.item(),
                         'rejected_rewards': avg_rejected_rewards.item(),
                         'model_margin': avg_model_margin.item(),
+                        'preference_accuracy': preference_accuracy.item(),
+                        'preference_accuracy_per_token': preference_accuracy_per_token.item(),
                         'lr': current_lr
                     }, step=(epoch * len(train_loader) + step + 1))
                 running_loss = 0.0
