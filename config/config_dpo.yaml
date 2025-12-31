@@ -17,9 +17,11 @@ dpo_training:
   beta: 0.1
   learning_rate: 5e-6
   gradient_accumulation_steps: 4
+  eval_batch_size: 16
   gradient_clipping_enabled: true
   max_grad_norm: 10
   warmup_steps: 0
+  eval_steps: 100
   log_steps: 10
 
 dpo_debug:

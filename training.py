@@ -142,6 +142,65 @@ def save_model(policy, save_path, is_main_process):
             policy.save_pretrained(save_path)
 
 
+def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distributed):
+    policy.eval()
+    ref_model.eval()
+
+    loss_sum = 0.0
+    chosen_rewards_sum = 0.0
+    rejected_rewards_sum = 0.0
+    pref_correct_sum = 0.0
+    policy_pref_correct_sum = 0.0
+    sample_count = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = to_device_batch(batch, device)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
+                policy_chosen_log_prob, policy_rejected_log_prob, ref_chosen_log_prob, ref_rejected_log_prob = compute_batch_log_prob(
+                    batch, policy=policy, ref_model=ref_model
+                )
+                loss_raw, chosen_rewards, rejected_rewards, _ = dpo_loss(
+                    policy_chosen_log_prob=policy_chosen_log_prob,
+                    policy_rejected_log_prob=policy_rejected_log_prob,
+                    ref_chosen_log_prob=ref_chosen_log_prob,
+                    ref_rejected_log_prob=ref_rejected_log_prob,
+                    beta=beta,
+                )
+
+            batch_size = loss_raw.numel()
+            loss_sum += loss_raw.sum().item()
+            chosen_rewards_sum += chosen_rewards.sum().item()
+            rejected_rewards_sum += rejected_rewards.sum().item()
+            pref_correct_sum += (chosen_rewards > rejected_rewards).float().sum().item()
+            policy_pref_correct_sum += (policy_chosen_log_prob > policy_rejected_log_prob).float().sum().item()
+            sample_count += batch_size
+
+    if is_distributed:
+        stats = torch.tensor(
+            [
+                loss_sum,
+                chosen_rewards_sum,
+                rejected_rewards_sum,
+                pref_correct_sum,
+                policy_pref_correct_sum,
+                sample_count,
+            ],
+            device=device,
+        )
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        loss_sum, chosen_rewards_sum, rejected_rewards_sum, pref_correct_sum, policy_pref_correct_sum, sample_count = stats.tolist()
+
+    sample_count = max(1, int(sample_count))
+    return {
+        "eval_loss": loss_sum / sample_count,
+        "eval_chosen_rewards": chosen_rewards_sum / sample_count,
+        "eval_rejected_rewards": rejected_rewards_sum / sample_count,
+        "eval_preference_accuracy": pref_correct_sum / sample_count,
+        "eval_preference_accuracy_policy": policy_pref_correct_sum / sample_count,
+    }
+
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
@@ -249,6 +308,7 @@ def train():
     if gradient_accumulation_steps < 1:
         raise ValueError("gradient_accumulation_steps must be >= 1")
     warmup_steps = int(dpo_training_config.get("warmup_steps", 0))
+    eval_steps = int(dpo_training_config.get("eval_steps", 0))
     grad_clip_enabled = bool(dpo_training_config.get("gradient_clipping_enabled", False))
     max_grad_norm = float(dpo_training_config.get("max_grad_norm", 1.0))
     if grad_clip_enabled and max_grad_norm <= 0:
@@ -286,11 +346,12 @@ def train():
         running_loss = 0.0
         optimizer.zero_grad()
         for step, batch in pbar:
+            global_step = epoch * len(train_loader) + step + 1
             batch = to_device_batch(batch, device)
 
             # generate logits for each part
             # using bf16
-            with torch.cuda.amp.autocast(enabled=use_bf16, dtype=torch.bfloat16): 
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 # compute log_prob
                 policy_chosen_log_prob, policy_rejected_log_prob, ref_chosen_log_prob, ref_rejected_log_prob = compute_batch_log_prob(batch, policy=policy, ref_model=ref_model)
 
@@ -324,6 +385,15 @@ def train():
                 preference_accuracy_per_token = (
                     per_token_chosen_reward > per_token_rejected_reward
                 ).float().mean()
+                preference_accuracy_policy = (
+                    policy_chosen_log_prob > policy_rejected_log_prob
+                ).float().mean()
+                if is_main_process and epoch == 0 and step == 0:
+                    wandb.log({
+                        'preference_accuracy': preference_accuracy.item(),
+                        'preference_accuracy_per_token': preference_accuracy_per_token.item(),
+                        'preference_accuracy_policy': preference_accuracy_policy.item(),
+                    }, step=0)
 
             loss = loss_raw_mean / gradient_accumulation_steps
             loss.backward()
@@ -356,9 +426,24 @@ def train():
                         'model_margin': avg_model_margin.item(),
                         'preference_accuracy': preference_accuracy.item(),
                         'preference_accuracy_per_token': preference_accuracy_per_token.item(),
+                        'preference_accuracy_policy': preference_accuracy_policy.item(),
                         'lr': current_lr
-                    }, step=(epoch * len(train_loader) + step + 1))
+                    }, step=global_step)
                 running_loss = 0.0
+
+            if eval_steps > 0 and global_step % eval_steps == 0:
+                eval_metrics = evaluate_dpo(
+                    policy=policy,
+                    ref_model=ref_model,
+                    val_loader=val_loader,
+                    device=device,
+                    use_bf16=use_bf16,
+                    beta=config['dpo_training']['beta'],
+                    is_distributed=is_distributed,
+                )
+                if is_main_process:
+                    wandb.log(eval_metrics, step=global_step)
+                policy.train()
 
     # save model
     mount_dir = config.get('mount_dir', None)

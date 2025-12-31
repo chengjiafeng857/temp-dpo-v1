@@ -310,6 +310,7 @@ def build_train_val(config, tokenizer):
     seed = int(config["dataset"].get("seed", 42))
     max_len = int(config["dataset"]["max_len"])
     batch_size = int(config["dpo_training"]["batch_size"])
+    eval_batch_size = int(config["dpo_training"].get("eval_batch_size", batch_size))
 
     if _is_hh_dataset(dataset_name) or _is_shp_dataset(dataset_name):
         dataset_id = "Anthropic/hh-rlhf" if _is_hh_dataset(dataset_name) else "stanfordnlp/SHP"
@@ -377,7 +378,7 @@ def build_train_val(config, tokenizer):
     )
     val_loader = DataLoader(
         val_ds_raw,
-        batch_size=batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         sampler=val_sampler,
         collate_fn=ds_collate,
