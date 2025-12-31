@@ -142,7 +142,7 @@ def save_model(policy, save_path, is_main_process):
             policy.save_pretrained(save_path)
 
 
-def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distributed):
+def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distributed, is_main_process):
     policy.eval()
     ref_model.eval()
 
@@ -154,7 +154,14 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
     sample_count = 0
 
     with torch.no_grad():
-        for batch in val_loader:
+        eval_iter = tqdm(
+            val_loader,
+            desc="eval",
+            dynamic_ncols=True,
+            leave=False,
+            disable=not is_main_process,
+        )
+        for batch in eval_iter:
             batch = to_device_batch(batch, device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 policy_chosen_log_prob, policy_rejected_log_prob, ref_chosen_log_prob, ref_rejected_log_prob = compute_batch_log_prob(
@@ -440,6 +447,7 @@ def train():
                     use_bf16=use_bf16,
                     beta=config['dpo_training']['beta'],
                     is_distributed=is_distributed,
+                    is_main_process=is_main_process,
                 )
                 if is_main_process:
                     wandb.log(eval_metrics, step=global_step)
