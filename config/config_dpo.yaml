@@ -19,9 +19,9 @@ dpo_training:
   gradient_accumulation_steps: 4
   eval_batch_size: 16
   gradient_clipping_enabled: true
-  max_grad_norm: 10
+  max_grad_norm: 1
   warmup_steps: 0
-  eval_steps: 1
+  eval_steps: 2
   log_steps: 10
 
 dpo_debug:

@@ -151,6 +151,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
     rejected_rewards_sum = 0.0
     pref_correct_sum = 0.0
     policy_pref_correct_sum = 0.0
+    pref_token_correct_sum = 0.0
+    policy_pref_token_correct_sum = 0.0
     sample_count = 0
 
     with torch.no_grad():
@@ -181,6 +183,14 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
             rejected_rewards_sum += rejected_rewards.sum().item()
             pref_correct_sum += (chosen_rewards > rejected_rewards).float().sum().item()
             policy_pref_correct_sum += (policy_chosen_log_prob > policy_rejected_log_prob).float().sum().item()
+            chosen_token_counts = (batch["chosen_labels"] != -100).sum(-1).clamp(min=1)
+            rejected_token_counts = (batch["rejected_labels"] != -100).sum(-1).clamp(min=1)
+            per_token_chosen_reward = chosen_rewards / chosen_token_counts
+            per_token_rejected_reward = rejected_rewards / rejected_token_counts
+            pref_token_correct_sum += (per_token_chosen_reward > per_token_rejected_reward).float().sum().item()
+            policy_per_token_chosen = policy_chosen_log_prob / chosen_token_counts
+            policy_per_token_rejected = policy_rejected_log_prob / rejected_token_counts
+            policy_pref_token_correct_sum += (policy_per_token_chosen > policy_per_token_rejected).float().sum().item()
             sample_count += batch_size
 
     if is_distributed:
@@ -191,12 +201,23 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
                 rejected_rewards_sum,
                 pref_correct_sum,
                 policy_pref_correct_sum,
+                pref_token_correct_sum,
+                policy_pref_token_correct_sum,
                 sample_count,
             ],
             device=device,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        loss_sum, chosen_rewards_sum, rejected_rewards_sum, pref_correct_sum, policy_pref_correct_sum, sample_count = stats.tolist()
+        (
+            loss_sum,
+            chosen_rewards_sum,
+            rejected_rewards_sum,
+            pref_correct_sum,
+            policy_pref_correct_sum,
+            pref_token_correct_sum,
+            policy_pref_token_correct_sum,
+            sample_count,
+        ) = stats.tolist()
 
     sample_count = max(1, int(sample_count))
     return {
@@ -205,6 +226,8 @@ def evaluate_dpo(policy, ref_model, val_loader, device, use_bf16, beta, is_distr
         "eval_rejected_rewards": rejected_rewards_sum / sample_count,
         "eval_preference_accuracy": pref_correct_sum / sample_count,
         "eval_preference_accuracy_policy": policy_pref_correct_sum / sample_count,
+        "eval_preference_accuracy_per_token": pref_token_correct_sum / sample_count,
+        "eval_preference_accuracy_policy_per_token": policy_pref_token_correct_sum / sample_count,
     }
 
 
